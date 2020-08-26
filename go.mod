@@ -17,11 +17,18 @@ module github.com/laremere/space-agon
 go 1.13
 
 require (
-	agones.dev/agones v1.1.0
+	agones.dev/agones v1.7.0
 	github.com/golang/protobuf v1.3.2
 	golang.org/x/net v0.0.0-20191105084925-a882066a44e0
 	google.golang.org/grpc v1.25.0
-	k8s.io/apimachinery v0.0.0-20190221084156-01f179d85dbc
+	k8s.io/apimachinery v0.15.11
 	k8s.io/client-go v9.0.0+incompatible
 	open-match.dev/open-match v0.4.1-0.20191113214301-7a1dcbdf9324
+)
+
+replace (
+	agones.dev/agones => agones.dev/agones v1.7.0
+	k8s.io/api => k8s.io/api v0.15.11
+	k8s.io/apimachinery => k8s.io/apimachinery v0.15.11
+	k8s.io/client-go => k8s.io/client-go v0.15.11
 )

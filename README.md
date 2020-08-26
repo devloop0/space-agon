@@ -1,3 +1,17 @@
+# Multi-cluster Demo specifics
+
+All relevant changes are in the director/director.go file.
+
+Changed the director to support the following features for a multi-cluster and multi-realm Agones allocator:
+
+1. Disabled mTLS on incoming connections to the Agones allocator; this means the director can connect to the Agones allocator through grpc with grpc.WithInsecure()
+
+2. Changed the director from using the GameServerAllocations API to using the grpc AllocationRequest API to directly connect to the Agones allocator (you just need to install the Agones allocator on a cluster with the directory; you don't need everything else).
+
+3. Changed the director to cycle through a set of realms by enabling multi-cluster allocation when sending an AllocationRequest to the Agones allocator.
+
+# Original README
+
 Space Agon is a demo integration of [Agones](https://agones.dev/) and
 [Open Match](https://open-match.dev/).  There will likely be a thorough guide at
 some point soon, but for now it is possible to install it from the commands
