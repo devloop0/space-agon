@@ -24,19 +24,40 @@ import (
 	"google.golang.org/grpc"
 	"open-match.dev/open-match/pkg/pb"
 
+	allocationpb "agones.dev/agones/pkg/allocation/go"
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
-	allocationv1 "agones.dev/agones/pkg/apis/allocation/v1"
 	"agones.dev/agones/pkg/client/clientset/versioned"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 )
 
+const (
+	gcgsRealmLabelName = "gameservices.googleapis.com/realm"
+	gameServerDeploymentName = "<DEPLOYMENT-NAME>"
+	allocatorIP = "<IP>"
+	allocatorPort = "443"
+)
+
+var (
+	realmNames = [2]string{"space-agon-realm1", "space-agon-realm2"}
+	realmIndex = 0
+)
+
 func main() {
 	log.Println("Starting Director")
+
+	allocatorEndpoint := allocatorIP + ":" + allocatorPort
+	log.Printf("Trying to connect to endpoint %v", allocatorEndpoint)
+	dialOpts := grpc.WithInsecure()
+	conn, err := grpc.Dial(allocatorEndpoint, dialOpts)
+	if err != nil {
+		log.Fatalf("Could not connect to allocator(%v): %v", allocatorEndpoint, err)
+	}
+	grpcClient := allocationpb.NewAllocationServiceClient(conn)
+
 	for range time.Tick(time.Second) {
-		if err := run(); err != nil {
+		if err := run(grpcClient); err != nil {
 			log.Println("Error running director:", err.Error())
 		}
 	}
@@ -84,17 +105,25 @@ func createOMFetchMatchesRequest() *pb.FetchMatchesRequest {
 	}
 }
 
-func createAgonesGameServerAllocation() *allocationv1.GameServerAllocation {
-	return &allocationv1.GameServerAllocation{
-		Spec: allocationv1.GameServerAllocationSpec{
-			Required: metav1.LabelSelector{
-				MatchLabels: map[string]string{agonesv1.FleetNameLabel: "dedicated"},
+func createAgonesAllocationRequest() *allocationpb.AllocationRequest {
+	currRealm := realmNames[realmIndex]
+	realmIndex = (realmIndex + 1) % len(realmNames)
+	log.Printf("Chose realm %v to create AllocationRequest for", currRealm)
+	return &allocationpb.AllocationRequest{
+		Namespace: "default",
+		MultiClusterSetting: &allocationpb.MultiClusterSetting{
+			Enabled: true,
+			PolicySelector: &allocationpb.LabelSelector{
+				MatchLabels: map[string]string{gcgsRealmLabelName: currRealm},
 			},
+		},
+		RequiredGameServerSelector: &allocationpb.LabelSelector{
+			MatchLabels: map[string]string{agonesv1.FleetNameLabel: gameServerDeploymentName},
 		},
 	}
 }
 
-func createOMAssignTicketRequest(match *pb.Match, gsa *allocationv1.GameServerAllocation) *pb.AssignTicketsRequest {
+func createOMAssignTicketRequestFromAllocationResponse(match *pb.Match, ar *allocationpb.AllocationResponse) *pb.AssignTicketsRequest {
 	tids := []string{}
 	for _, t := range match.GetTickets() {
 		tids = append(tids, t.GetId())
@@ -103,16 +132,16 @@ func createOMAssignTicketRequest(match *pb.Match, gsa *allocationv1.GameServerAl
 	return &pb.AssignTicketsRequest{
 		TicketIds: tids,
 		Assignment: &pb.Assignment{
-			Connection: fmt.Sprintf("%s:%d", gsa.Status.Address, gsa.Status.Ports[0].Port),
+			Connection: fmt.Sprintf("%s:%d", ar.Address, ar.Ports[0].Port),
 		},
 	}
 }
 
-func run() error {
+func run(grpcClient allocationpb.AllocationServiceClient) error {
 	bc, closer := createOMBackendClient()
 	defer closer()
 
-	agonesClient := createAgonesClient()
+	// agonesClient := createAgonesClient()
 
 	stream, err := bc.FetchMatches(context.Background(), createOMFetchMatchesRequest())
 	if err != nil {
@@ -131,25 +160,15 @@ func run() error {
 			return fmt.Errorf("error streaming response from backend.FetchMatches call: %w", err)
 		}
 
-		gsa, err := agonesClient.AllocationV1().GameServerAllocations("default").Create(createAgonesGameServerAllocation())
+		ar, err := grpcClient.Allocate(context.Background(), createAgonesAllocationRequest())
 		if err != nil {
-			return fmt.Errorf("error requesting allocation: %w", err)
-		}
-		// TODO: This drops matches, instead of properly allocating them.  Tickets will only return to
-		// the general pool after (iirc) one minute.  We should either tell OM that an assignment isn't
-		// coming, or retry for a little while.
-		if gsa.Status.State != allocationv1.GameServerAllocationAllocated {
-			log.Printf("failed to allocate game server.\n")
-			continue
+			return fmt.Errorf("allocation error: %w", err)
 		}
 
-		if _, err = bc.AssignTickets(context.Background(), createOMAssignTicketRequest(resp.GetMatch(), gsa)); err != nil {
-			// Corner case where we allocated a game server for players who left the queue after some waiting time.
-			// Note that we may still leak some game servers when tickets got assigned but players left the queue before game frontend announced the assignments.
-			if err = agonesClient.AgonesV1().GameServers("default").Delete(gsa.Status.GameServerName, &metav1.DeleteOptions{}); err != nil {
-				return fmt.Errorf("error assigning tickets: %w", err)
-			}
-		}
+		log.Printf("AllocationResponse: %+v", *ar)
+
+		// TODO: This will leak gameservers from people who left the queue early (before their game started)
+		bc.AssignTickets(context.Background(), createOMAssignTicketRequestFromAllocationResponse(resp.GetMatch(), ar))
 
 		totalMatches++
 	}
